@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voxel Japanese Garden - Living World</title>
+    <style>
+        /* Basic styles to make the scene fill the screen */
+        body {
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background-color: #1a1a2e; /* Dark background color */
+            overflow: hidden; /* Prevents scrollbars from appearing */
+        }
+
+        /* Styles for the 3D canvas */
+        #c {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        /* Styles for the task input form */
+        .task-form {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(255, 255, 255, 0.1); /* More transparent for night theme */
+            padding: 15px 20px;
+            border-radius: 16px;
+            box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.2);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            display: flex;
+            gap: 10px;
+            z-index: 10;
+        }
+
+        .task-form input {
+            border: none;
+            background: transparent;
+            border-bottom: 2px solid #a0aec0;
+            padding: 8px;
+            font-size: 16px;
+            width: 250px;
+            outline: none;
+            transition: border-color 0.3s;
+            color: white;
+        }
+        
+        .task-form input::placeholder {
+            color: #e2e8f0;
+        }
+
+        .task-form input:focus {
+            border-bottom-color: #f687b3;
+        }
+
+        .task-form button {
+            background-color: #f687b3;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 12px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+
+        .task-form button:hover {
+            background-color: #ed64a6;
+        }
+
+        /* Styles for the hover tooltip */
+        #tooltip {
+            position: absolute;
+            display: none;
+            background: rgba(0, 0, 0, 0.75);
+            color: white;
+            padding: 8px 12px;
+            border-radius: 8px;
+            font-size: 14px;
+            pointer-events: none; /* Allows mouse events to pass through */
+            z-index: 100;
+            text-align: center;
+        }
+
+        #tooltip .task-name {
+            font-weight: bold;
+            font-size: 16px;
+        }
+
+        #tooltip .prompt {
+            font-size: 12px;
+            color: #ccc;
+        }
+    </style>
+</head>
+<body>
+
+    <canvas id="c"></canvas>
+
+    <div class="task-form">
+        <form id="taskForm">
+            <input type="text" id="taskInput" placeholder="Add a new blossom task..." autocomplete="off">
+            <button type="submit">Plant</button>
+        </form>
+    </div>
+
+    <div id="tooltip"></div>
+
+    <!-- Import three.js and OrbitControls -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        // --- Basic Scene Setup ---
+        const canvas = document.querySelector('#c');
+        const renderer = new THREE.WebGLRenderer({ antialias: true, canvas });
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color('#00001a');
+        scene.fog = new THREE.Fog('#00001a', 80, 250);
+
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 25, 60);
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+        controls.maxPolarAngle = Math.PI / 1.9;
+        controls.target.set(0, 8, 0);
+
+        // --- Lighting ---
+        const ambientLight = new THREE.AmbientLight(0x7070a0, 0.8);
+        scene.add(ambientLight);
+
+        const moonLight = new THREE.DirectionalLight(0xffffff, 0.4);
+        moonLight.position.set(-50, 70, 40);
+        moonLight.castShadow = true;
+        moonLight.shadow.mapSize.width = 2048;
+        moonLight.shadow.mapSize.height = 2048;
+        moonLight.shadow.camera.top = 70;
+        moonLight.shadow.camera.bottom = -70;
+        moonLight.shadow.camera.left = -70;
+        moonLight.shadow.camera.right = 70;
+        scene.add(moonLight);
+
+        // --- Scene Elements ---
+        const staticElements = [];
+        const groundBlocks = [];
+        const terrain = new Map(); // Store final terrain height data here
+
+        // --- World Generation ---
+        function createWorld() {
+            const grassMat1 = new THREE.MeshStandardMaterial({ color: '#3c583a' });
+            const grassMat2 = new THREE.MeshStandardMaterial({ color: '#4a6946' });
+            const grassMat3 = new THREE.MeshStandardMaterial({ color: '#2d422a' });
+            const grassMats = [grassMat1, grassMat2, grassMat3];
+            const waterMat = new THREE.MeshStandardMaterial({ color: '#3b82f6', transparent: true, opacity: 0.7 });
+            
+            const mainIslandSize = 40;
+            const waterLevel = 1;
+            const blockPositions = [[], [], []];
+
+            // Generate terrain height map
+            for (let x = -mainIslandSize; x < mainIslandSize; x++) {
+                for (let z = -mainIslandSize; z < mainIslandSize; z++) {
+                    const dist = Math.sqrt(x*x + z*z);
+                    if (dist > mainIslandSize) continue;
+                    
+                    const noiseVal = (Math.sin(x/12) * Math.cos(z/12)) * 2.5;
+                    const height = 2 + noiseVal + (mainIslandSize - dist) * 0.2;
+                    terrain.set(`${x},${z}`, Math.floor(height));
+                }
+            }
+            
+            // Carve cave system
+            let cx = -20, cz = 10, cy = 8;
+            for(let i=0; i<35; i++) {
+                for(let dx=-1; dx<=1; dx++) {
+                    for(let dy=-1; dy<=1; dy++) {
+                        for(let dz=-1; dz<=1; dz++) {
+                             const key = `${cx+dx},${cz+dz}`;
+                             if(terrain.has(key) && terrain.get(key) > cy+dy) {
+                                 terrain.set(key, terrain.get(key) - 1);
+                             }
+                        }
+                    }
+                }
+                cx += Math.round(Math.random()*2-1);
+                cz += Math.round(Math.random()*2-1);
+            }
+
+            // Create blocks from height map
+            for (const [key, height] of terrain) {
+                const [x, z] = key.split(',').map(Number);
+                if (height > waterLevel) {
+                    const matIndex = Math.floor(Math.random() * grassMats.length);
+                    blockPositions[matIndex].push({x, y: height/2, z, height});
+                }
+            }
+
+            // OPTIMIZATION: Use InstancedMesh for terrain
+            const dummy = new THREE.Object3D();
+            const geometry = new THREE.BoxGeometry(1, 1, 1);
+            blockPositions.forEach((positions, matIndex) => {
+                const instancedMesh = new THREE.InstancedMesh(geometry, grassMats[matIndex], positions.length);
+                instancedMesh.castShadow = true;
+                instancedMesh.receiveShadow = true;
+                instancedMesh.userData.type = 'grass';
+
+                positions.forEach((pos, i) => {
+                    dummy.position.set(pos.x, pos.y, pos.z);
+                    dummy.scale.set(1, pos.height, 1);
+                    dummy.updateMatrix();
+                    instancedMesh.setMatrixAt(i, dummy.matrix);
+                });
+                scene.add(instancedMesh);
+                groundBlocks.push(instancedMesh);
+            });
+
+            // Background mountains & Water
+            createMountain(-50, -80, 50, 25);
+            createMountain(60, -90, 45, 20);
+            const water = new THREE.Mesh(new THREE.PlaneGeometry(500, 500), waterMat);
+            water.rotation.x = -Math.PI / 2;
+            water.position.y = waterLevel + 0.5;
+            scene.add(water);
+        }
+
+        function createMountain(px, pz, height, radius) {
+            const mountainGroup = new THREE.Group();
+            const stoneMat = new THREE.MeshStandardMaterial({ color: '#6b7280' });
+            const snowMat = new THREE.MeshStandardMaterial({ color: '#ffffff' });
+
+            for(let i=0; i < 500; i++) {
+                const x = (Math.random() - 0.5) * radius * 2;
+                const z = (Math.random() - 0.5) * radius * 2;
+                const dist = Math.sqrt(x*x + z*z);
+                if (dist > radius) continue;
+
+                const y = (radius - dist) * (height / radius) + Math.random() * 5;
+                const block = new THREE.Mesh(new THREE.BoxGeometry(4, y, 4), y > height * 0.7 ? snowMat : stoneMat);
+                block.position.set(px + x, y/2, pz + z);
+                block.castShadow = true;
+                mountainGroup.add(block);
+            }
+            scene.add(mountainGroup);
+        }
+        
+        function createStars() {
+            const starVertices = [];
+            for (let i = 0; i < 10000; i++) {
+                const x = THREE.MathUtils.randFloatSpread(3000);
+                const y = THREE.MathUtils.randFloat(80, 1000);
+                const z = THREE.MathUtils.randFloatSpread(3000);
+                starVertices.push(x, y, z);
+            }
+            const starGeometry = new THREE.BufferGeometry();
+            starGeometry.setAttribute('position', new THREE.Float32BufferAttribute(starVertices, 3));
+            const starMaterial = new THREE.PointsMaterial({ color: 0xffffff, size: 0.25 });
+            const stars = new THREE.Points(starGeometry, starMaterial);
+            scene.add(stars);
+        }
+        
+        function createPagoda(position) {
+            const group = new THREE.Group();
+            const woodMat = new THREE.MeshStandardMaterial({color: '#8d5524'});
+            const roofMat = new THREE.MeshStandardMaterial({color: '#b91c1c'});
+            for(let i=0; i<3; i++) {
+                const yPos = i * 3.5;
+                const base = new THREE.Mesh(new THREE.BoxGeometry(6 - i*1.5, 2, 6 - i*1.5), woodMat);
+                base.position.y = yPos;
+                const roof = new THREE.Mesh(new THREE.CylinderGeometry(0, 5 - i, 2.5, 4, 1));
+                roof.material = roofMat;
+                roof.position.y = yPos + 2;
+                roof.rotation.y = Math.PI / 4;
+                group.add(base, roof);
+            }
+            group.position.copy(position);
+            group.traverse(c => {if(c.isMesh){c.castShadow=true; c.receiveShadow=true;}});
+            scene.add(group);
+            staticElements.push({object: group, radius: 8});
+        }
+
+        function createToriiGate(position, rotationY = 0) {
+            const gateGroup = new THREE.Group();
+            const mat = new THREE.MeshStandardMaterial({color: '#b91c1c'});
+            const postHeight = 10;
+            const post1 = new THREE.Mesh(new THREE.BoxGeometry(0.8, postHeight, 0.8), mat);
+            post1.position.set(-4, postHeight / 2, 0);
+            const post2 = new THREE.Mesh(new THREE.BoxGeometry(0.8, postHeight, 0.8), mat);
+            post2.position.set(4, postHeight / 2, 0);
+            const cross1 = new THREE.Mesh(new THREE.BoxGeometry(10, 1, 1), mat);
+            cross1.position.y = postHeight - 0.5;
+            const cross2 = new THREE.Mesh(new THREE.BoxGeometry(12, 1.2, 1.2), mat);
+            cross2.position.y = postHeight + 1;
+            gateGroup.add(post1, post2, cross1, cross2);
+            gateGroup.position.copy(position);
+            gateGroup.rotation.y = rotationY;
+            gateGroup.traverse(child => { if(child.isMesh) child.castShadow = true; });
+            scene.add(gateGroup);
+            staticElements.push({object: gateGroup, radius: 8});
+        }
+        
+        function createStoneShrine(position) {
+            const group = new THREE.Group();
+            const stoneMat = new THREE.MeshStandardMaterial({color: '#8d8d8d'});
+            const base = new THREE.Mesh(new THREE.BoxGeometry(4,1,3), stoneMat);
+            const post1 = new THREE.Mesh(new THREE.BoxGeometry(0.5, 2, 0.5), stoneMat);
+            post1.position.set(-1.5, 1.5, 0);
+            const post2 = new THREE.Mesh(new THREE.BoxGeometry(0.5, 2, 0.5), stoneMat);
+            post2.position.set(1.5, 1.5, 0);
+            const roof = new THREE.Mesh(new THREE.BoxGeometry(4.5, 0.5, 3.5), stoneMat);
+            roof.position.y = 2.75;
+            group.add(base, post1, post2, roof);
+            group.position.copy(position);
+            group.traverse(c => {if(c.isMesh){c.castShadow=true; c.receiveShadow=true;}});
+            scene.add(group);
+            staticElements.push({object: group, radius: 5});
+        }
+        
+        function createJapaneseBridge(start, end) {
+            const group = new THREE.Group();
+            const woodMat = new THREE.MeshStandardMaterial({color: '#8d5524'});
+            const length = start.distanceTo(end);
+            const dir = end.clone().sub(start).normalize();
+            const arcHeight = 2;
+
+            for(let i=0; i <= length; i += 0.5) {
+                const pos = start.clone().add(dir.clone().multiplyScalar(i));
+                const percent = i / length;
+                pos.y += Math.sin(percent * Math.PI) * arcHeight;
+
+                // FIX: Changed BoxGeometry to make the walkway wider
+                const plank = new THREE.Mesh(new THREE.BoxGeometry(4, 0.2, 0.5), woodMat);
+                plank.position.copy(pos);
+                plank.lookAt(end);
+                group.add(plank);
+
+                if (i > 0 && i < length) {
+                    const railPostL = new THREE.Mesh(new THREE.BoxGeometry(0.2, 1.5, 0.2), woodMat);
+                    railPostL.position.copy(pos).add(new THREE.Vector3(-1.8, 0.75, 0).applyQuaternion(plank.quaternion));
+                    group.add(railPostL);
+                    const railPostR = new THREE.Mesh(new THREE.BoxGeometry(0.2, 1.5, 0.2), woodMat);
+                    railPostR.position.copy(pos).add(new THREE.Vector3(1.8, 0.75, 0).applyQuaternion(plank.quaternion));
+                    group.add(railPostR);
+                }
+            }
+            scene.add(group);
+            staticElements.push({object: group, radius: length / 2});
+        }
+        
+        function createRockFormation(position) {
+            const group = new THREE.Group();
+            const mat = new THREE.MeshStandardMaterial({color: '#6b7280'});
+            for(let i=0; i<8; i++) {
+                const size = Math.random() * 2 + 0.8;
+                const rock = new THREE.Mesh(new THREE.BoxGeometry(size, size, size), mat);
+                rock.position.set((Math.random()-0.5)*3, size/2, (Math.random()-0.5)*3);
+                rock.rotation.set(Math.random(), Math.random(), Math.random());
+                rock.castShadow = true;
+                group.add(rock);
+            }
+            group.position.copy(position);
+            scene.add(group);
+            staticElements.push({object: group, radius: 4});
+        }
+
+        function createFlowerPatch(position, color) {
+            const group = new THREE.Group();
+            const mat = new THREE.MeshStandardMaterial({color: color});
+            for(let i=0; i<10; i++) {
+                const flower = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.2, 0.2), mat);
+                flower.position.set((Math.random()-0.5)*2, 0.1, (Math.random()-0.5)*2);
+                group.add(flower);
+            }
+            group.position.copy(position);
+            scene.add(group);
+        }
+
+        // --- Helper to find ground height ---
+        function getGroundHeight(x, z) {
+            const key = `${Math.round(x)},${Math.round(z)}`;
+            if (terrain.has(key)) {
+                return terrain.get(key);
+            }
+            return 0; // Default height if no ground is found
+        }
+
+        // --- Initialize static elements ---
+        createWorld();
+        createStars();
+        
+        let y = getGroundHeight(20, -15);
+        createPagoda(new THREE.Vector3(20, y, -15));
+        
+        y = getGroundHeight(0, 35);
+        createToriiGate(new THREE.Vector3(0, y, 35));
+        
+        y = getGroundHeight(0, 0);
+        createStoneShrine(new THREE.Vector3(0, y, 0));
+        
+        let bridgeStartY = getGroundHeight(-15, 25) + 0.8;
+        let bridgeEndY = getGroundHeight(-5, 25) + 0.8;
+        createJapaneseBridge(new THREE.Vector3(-15, bridgeStartY, 25), new THREE.Vector3(-5, bridgeEndY, 25));
+
+        // Rock formations
+        createRockFormation(new THREE.Vector3(-10, getGroundHeight(-10, -15), -15));
+        createRockFormation(new THREE.Vector3(25, getGroundHeight(25, 5), 5));
+        createRockFormation(new THREE.Vector3(-25, getGroundHeight(-25, 25), 25));
+        createRockFormation(new THREE.Vector3(30, getGroundHeight(30, 30), 30));
+        createRockFormation(new THREE.Vector3(-30, getGroundHeight(-30, -5), -5));
+        createRockFormation(new THREE.Vector3(10, getGroundHeight(10, -30), -30));
+
+        // Flower patches
+        createFlowerPatch(new THREE.Vector3(8, getGroundHeight(8, 10) + 0.6, 10), '#ef4444');
+        createFlowerPatch(new THREE.Vector3(-12, getGroundHeight(-12, 20) + 0.6, 20), '#facc15');
+        createFlowerPatch(new THREE.Vector3(15, getGroundHeight(15, 25) + 0.6, 25), '#8b5cf6');
+        createFlowerPatch(new THREE.Vector3(28, getGroundHeight(28, 15) + 0.6, 15), '#f97316');
+        createFlowerPatch(new THREE.Vector3(2, getGroundHeight(2, -10) + 0.6, -10), '#ec4899');
+        createFlowerPatch(new THREE.Vector3(-18, getGroundHeight(-18, 18) + 0.6, 18), '#14b8a6');
+        createFlowerPatch(new THREE.Vector3(-25, getGroundHeight(-25, -25) + 0.6, -25), '#ef4444');
+        createFlowerPatch(new THREE.Vector3(5, getGroundHeight(5, 30) + 0.6, 30), '#facc15');
+        createFlowerPatch(new THREE.Vector3(30, getGroundHeight(30, -20) + 0.6, -20), '#ffffff');
+        createFlowerPatch(new THREE.Vector3(-5, getGroundHeight(-5, -30) + 0.6, -30), '#8b5cf6');
+
+        // --- Task & Tree Logic ---
+        let taskObjects = [];
+        const taskForm = document.getElementById('taskForm');
+        const taskInput = document.getElementById('taskInput');
+        let currentlyHoveredTree = null;
+        const fallingBlocks = [];
+
+        function getSafeSpawnPosition() {
+            let position;
+            let isSafe = false;
+            let attempts = 0;
+            
+            while(!isSafe && attempts < 300) {
+                const x = (Math.random() - 0.5) * 70;
+                const z = (Math.random() - 0.5) * 70;
+                
+                const y = getGroundHeight(x, z);
+
+                if (y > 1) { // Ensure it's on the island, not water
+                    position = new THREE.Vector3(x, y + 0.5, z);
+                    
+                    isSafe = true;
+                    for(const el of [...staticElements, ...taskObjects.map(t => ({object: t, radius: 4}))]) {
+                        if (position.distanceTo(el.object.position) < el.radius) {
+                            isSafe = false;
+                            break;
+                        }
+                    }
+                }
+                attempts++;
+            }
+            return position;
+        }
+
+        function createBlossomTree(position, taskName) {
+            const treeGroup = new THREE.Group();
+            treeGroup.userData = { taskName, isTree: true, id: THREE.MathUtils.generateUUID() };
+            const trunkMaterial = new THREE.MeshStandardMaterial({ color: '#6d4c41' });
+            const trunk = new THREE.Mesh(new THREE.BoxGeometry(0.8, 3, 0.8), trunkMaterial);
+            trunk.position.y = 1.5;
+            treeGroup.add(trunk);
+            
+            const color1 = new THREE.Color('#ffc0cb'); // Pink
+            const color2 = new THREE.Color('#d8bfd8'); // Light Purple
+            const randomColor = new THREE.Color().lerpColors(color1, color2, Math.random());
+            const blossomMaterial = new THREE.MeshStandardMaterial({ color: randomColor });
+
+            for (let i = 0; i < 20; i++) {
+                const leaf = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), blossomMaterial);
+                leaf.position.set((Math.random() - 0.5) * 3, 3 + (Math.random() - 0.5) * 2, (Math.random() - 0.5) * 3);
+                leaf.rotation.set(Math.random(), Math.random(), Math.random());
+                treeGroup.add(leaf);
+            }
+            treeGroup.traverse(child => { if(child.isMesh) child.castShadow = true; });
+            treeGroup.position.copy(position);
+            scene.add(treeGroup);
+            taskObjects.push(treeGroup);
+        }
+
+        function removeTree(tree) {
+            tree.children.forEach(child => {
+                fallingBlocks.push({
+                    mesh: child.clone(),
+                    velocity: new THREE.Vector3((Math.random() - 0.5) * 3, Math.random() * 5, (Math.random() - 0.5) * 3),
+                    rotation: new THREE.Vector3(Math.random(), Math.random(), Math.random()).multiplyScalar(0.1),
+                    life: 100
+                });
+                fallingBlocks[fallingBlocks.length-1].mesh.position.copy(child.getWorldPosition(new THREE.Vector3()));
+                scene.add(fallingBlocks[fallingBlocks.length-1].mesh);
+            });
+            scene.remove(tree);
+            taskObjects = taskObjects.filter(t => t.userData.id !== tree.userData.id);
+        }
+
+        taskForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const taskName = taskInput.value.trim();
+            if (taskName) {
+                const position = getSafeSpawnPosition();
+                if(position) {
+                    createBlossomTree(position, taskName);
+                    taskInput.value = '';
+                } else {
+                    console.warn("Could not find a safe place for a tree! Try moving the camera or try again.");
+                }
+            }
+        });
+
+        // --- Interaction Logic ---
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        const tooltip = document.getElementById('tooltip');
+
+        window.addEventListener('mousemove', (event) => {
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+            tooltip.style.left = `${event.clientX + 15}px`;
+            tooltip.style.top = `${event.clientY + 15}px`;
+        });
+
+        window.addEventListener('click', () => {
+            if(currentlyHoveredTree) {
+                removeTree(currentlyHoveredTree);
+                currentlyHoveredTree = null;
+                tooltip.style.display = 'none';
+                document.body.style.cursor = 'default';
+            }
+        });
+
+        function checkIntersections() {
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(taskObjects, true);
+            if (intersects.length > 0) {
+                let intersectedObject = intersects[0].object;
+                while (intersectedObject.parent && !intersectedObject.userData.isTree) {
+                    intersectedObject = intersectedObject.parent;
+                }
+                if (intersectedObject.userData.isTree) {
+                    currentlyHoveredTree = intersectedObject;
+                    tooltip.style.display = 'block';
+                    tooltip.innerHTML = `<div class="task-name">${intersectedObject.userData.taskName}</div><div class="prompt">[Click to Complete]</div>`;
+                    document.body.style.cursor = 'pointer';
+                    return;
+                }
+            }
+            currentlyHoveredTree = null;
+            tooltip.style.display = 'none';
+            document.body.style.cursor = 'default';
+        }
+
+        // --- Animation Loop ---
+        const clock = new THREE.Clock();
+        function animate() {
+            requestAnimationFrame(animate);
+            const delta = clock.getDelta();
+
+            for(let i = fallingBlocks.length - 1; i >= 0; i--) {
+                const block = fallingBlocks[i];
+                block.velocity.y -= 9.8 * delta;
+                block.mesh.position.add(block.velocity.clone().multiplyScalar(delta));
+                block.mesh.rotation.x += block.rotation.x;
+                block.mesh.rotation.y += block.rotation.y;
+                block.mesh.rotation.z += block.rotation.z;
+                block.life--;
+                if(block.life <= 0) {
+                    scene.remove(block.mesh);
+                    fallingBlocks.splice(i, 1);
+                }
+            }
+            
+            checkIntersections();
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        animate();
+    </script>
+</body>
+</html>
